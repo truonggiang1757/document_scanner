@@ -1,10 +1,13 @@
+import 'dart:ffi';
 import 'dart:io';
+import 'package:cunning_document_scanner/cunning_document_scanner.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:document_scanner/RecognizerScreen.dart';
 import 'package:document_scanner/ImageViewScreen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -14,6 +17,8 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  List<String>? imagesPath = [];
+  bool _isLoading = false;
   late ImagePicker imagePicker;
   List<File> files = [];
 
@@ -24,14 +29,17 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadFiles();
   }
 
-  // Method to get the application's document directory and create a folder
+  // Method to get the DCIM ScannedDocuments folder path
   Future<String> _getFolderPath() async {
-    final directory = await getApplicationDocumentsDirectory();
-    final folderPath = Directory('${directory.path}/MyAppFiles');
-    if (!await folderPath.exists()) {
-      await folderPath.create(recursive: true);
+    Directory? dcimDir = await getExternalStorageDirectory();
+    String folderPath = '${dcimDir!.parent.parent.parent.parent.path}/DCIM/ScannedDocuments';
+
+    // Create the folder if it doesn't exist
+    if (!await Directory(folderPath).exists()) {
+      await Directory(folderPath).create(recursive: true);
     }
-    return folderPath.path;
+
+    return folderPath;
   }
 
   // Method to store the picked image in the created folder
@@ -47,15 +55,39 @@ class _HomeScreenState extends State<HomeScreen> {
     _loadFiles();
   }
 
-  // Method to load files from the folder
+  // Method to load files from the DCIM/ScannedDocuments folder
   Future<void> _loadFiles() async {
     final folderPath = await _getFolderPath();
     final directory = Directory(folderPath);
     final List<FileSystemEntity> entities = directory.listSync();
 
+    // Filter files and sort by last modified date (newest first)
     setState(() {
-      files = entities.whereType<File>().toList();
+      files = entities.whereType<File>().toList()
+        ..sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
     });
+  }
+
+  String timeAgo(DateTime dateTime) {
+    final Duration difference = DateTime.now().difference(dateTime);
+
+    if (difference.inDays > 1) {
+      return '${difference.inDays} days ago';
+    } else if (difference.inHours > 1) {
+      return '${difference.inHours} hours ago';
+    } else if (difference.inMinutes > 1) {
+      return '${difference.inMinutes} minutes ago';
+    } else {
+      return 'just now';
+    }
+  }
+
+  Future<void> requestPermission() async{
+    if(await Permission.storage.request().isGranted && await Permission.camera.request().isGranted){
+      print('success');
+    } else {
+      print('permission denied');
+    }
   }
 
   // Method to open the camera and capture an image
@@ -81,7 +113,9 @@ class _HomeScreenState extends State<HomeScreen> {
         title: Text('Document Scanner'),
         backgroundColor: Colors.blueAccent,
       ),
-      body: Container(
+      body: _isLoading ?
+      CircularProgressIndicator() :
+      Container(
         color: Colors.white,
         padding: EdgeInsets.only(top: 10, bottom: 10, left: 5, right: 5),
         child: Column(
@@ -152,27 +186,42 @@ class _HomeScreenState extends State<HomeScreen> {
             // The list of files in the middle section
             Expanded(
               child: Card(
-                color: Colors.black,
+                color: Colors.white,
                 child: Container(
                   padding: EdgeInsets.all(10),
                   child: files.isNotEmpty
                       ? ListView.builder(
                     itemCount: files.length,
                     itemBuilder: (context, index) {
+                      final file = files[index];
+                      final fileName = file.path.split('/').last;
+                      final lastModified = file.lastModifiedSync();
+
                       return Card(
                         color: Colors.white,
                         child: ListTile(
-                          leading: Icon(
-                            Icons.insert_drive_file,
-                            color: Colors.blueAccent,
+                          leading: Image.file(
+                            file,
+                            width: 50,
+                            height: 50,
+                            fit: BoxFit.cover, // Display a thumbnail of the image
                           ),
                           title: Text(
-                            files[index].path.split('/').last,
+                            fileName,
                             style: TextStyle(color: Colors.black),
                           ),
+                          subtitle: Text(
+                            timeAgo(lastModified), // Display the time ago
+                            style: TextStyle(color: Colors.grey),
+                          ),
                           onTap: () {
-                            // Add your file opening logic here
-                            print('Opening ${files[index].path}');
+                            // Navigate to RecognizerScreen with the selected file
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => RecognizerScreen(file),
+                              ),
+                            );
                           },
                         ),
                       );
@@ -187,6 +236,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
+
           ],
         ),
       ),
@@ -203,9 +253,60 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             IconButton(
               icon: Icon(Icons.camera, color: Colors.white, size: 50),
-              onPressed:
+              onPressed: () async {
+                // imagesPath = await CunningDocumentScanner.getPictures(
+                //   noOfPages: 1,
+                //   isGalleryImportAllowed: true,
+                // );
+                try {
+                  await requestPermission();
+
+                  final List<String>? scannedDocuments = await CunningDocumentScanner.getPictures(
+                    isGalleryImportAllowed: true,
+                  );
+                  if(scannedDocuments != null && scannedDocuments.isNotEmpty){
+                    setState(() {
+                      _isLoading = true;
+                    });
+                  }
+
+                  Directory? dcimDir = await getExternalStorageDirectory();
+                  String dcimPath = '${dcimDir!.parent.parent.parent.parent.path}/DCIM/ScannedDocuments';
+
+                  Directory(dcimPath).createSync(recursive: true);
+                  for(int i = 0; i < scannedDocuments!.length; i++){
+                    String fileName = 'scanned_document_${DateTime.now().millisecondsSinceEpoch}_$i.jpg';
+                    String filePath = '$dcimPath/$fileName';
+
+                    File originalFile = File(scannedDocuments[i]);
+                    await originalFile.copy(filePath);
+                    print('Document saved at: $filePath');
+                  }
+
+                  await _loadFiles();
+
+                  showDialog(context: context, builder: (BuildContext context) => AlertDialog(title:Text('Success'), content: Text('Document have been saved to $dcimPath'),
+                      actions:[TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('OK'))]
+                  ));
+                } catch(e){
+                  print('Error: $e');
+                  showDialog(context: context, builder: (BuildContext context) => AlertDialog(
+                    title: Text('Error'),
+                    content: Text('Failed to scan or save documents'),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: Text('OK'))
+                    ],
+                  ));
+                }finally{
+                  setState(() {
+                    _isLoading = false;
+                  });
+                }
+              }
                 // Handle camera logic
-                _openCamera,
+                // _openCamera,
             ),
             IconButton(
               icon: Icon(Icons.image_outlined, color: Colors.white, size: 35),
